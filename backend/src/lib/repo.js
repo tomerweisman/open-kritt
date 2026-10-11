@@ -6,6 +6,17 @@ import { serializeWorkflow, serializeScan, timeAgo } from './serialize.js';
 import { isDefaultWorkflowName } from './defaultWorkflows.js';
 import { readResourceDiagnostics, resourceFailure, resourceWaitingNotice } from './resourceDiagnostics.js';
 
+const WORKFLOW_FINISHED_SCAN_STATUSES = new Set(['post_processing', 'completed']);
+const LINEAGE_PROGRESS_SCAN_STATUSES = new Set([
+  'pending',
+  'prewarming_cache',
+  'running',
+  'rate_limited',
+  'paused',
+  'failed',
+  'stopped',
+]);
+
 const PHASE_LABELS = {
   building_workspace: 'Building workspace',
   running_harness: 'Running harness',
@@ -755,16 +766,17 @@ export async function statusSummariesByScan(scans, stepsMap, workflowsById) {
     summary.recentEmptyResults.push(metadataEmptyResult(row, stepsMap, scan));
   }
 
-  for (const summary of summaries.values()) {
+  for (const [key, summary] of summaries) {
     summary.activeJobCount = summary.activeJobs.length;
     summary.recentErrors = orderScanErrorsForDisplay(summary.recentErrors).slice(0, 5);
     summary.recentEmptyResults = summary.recentEmptyResults.slice(0, 5);
     summary.latestError = summary.recentErrors.find((error) => !error.previousRun) || null;
-    summary.expectedStepLineages = summary.stepAttempts;
+    const workflowFinished = WORKFLOW_FINISHED_SCAN_STATUSES.has(scansById.get(key)?.status);
+    summary.expectedStepLineages = workflowFinished ? summary.stepCompletedAttempts : summary.stepAttempts;
     summary.completedStepLineages = summary.stepCompletedAttempts;
   }
 
-  const activeScans = scans.filter((scan) => ['running', 'rate_limited', 'paused', 'failed'].includes(scan.status));
+  const activeScans = scans.filter((scan) => LINEAGE_PROGRESS_SCAN_STATUSES.has(scan.status));
   if (activeScans.length) {
     const activeIds = activeScans.map((scan) => scan.id);
     const [lineageMetadata, lineageResults] = await Promise.all([

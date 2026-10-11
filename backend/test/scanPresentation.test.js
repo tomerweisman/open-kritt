@@ -352,6 +352,71 @@ test('status summary exposes successful empty step explanations', async (t) => {
   assert.equal(summary.recentEmptyResults[0].explanation, 'No reachable entrypoints were found.');
 });
 
+function mockLineageQueries(t, { counts, lineageRows }) {
+  const originalGroupBy = prisma.stepMetadata.groupBy;
+  const originalFindMany = prisma.stepMetadata.findMany;
+  const originalResultFindMany = prisma.stepResult.findMany;
+  prisma.stepMetadata.groupBy = async () => counts;
+  prisma.stepMetadata.findMany = async ({ where }) => {
+    if (where.status === 'running' || where.error || where.stub === true) return [];
+    if (where.kind === 'step') return lineageRows;
+    throw new Error(`Unexpected step metadata query: ${JSON.stringify(where)}`);
+  };
+  prisma.stepResult.findMany = async () => [];
+  t.after(() => {
+    prisma.stepMetadata.groupBy = originalGroupBy;
+    prisma.stepMetadata.findMany = originalFindMany;
+    prisma.stepResult.findMany = originalResultFindMany;
+  });
+}
+
+const retriedLineage = {
+  counts: [
+    { scanId: 9n, kind: 'step', status: 'completed', stub: false, _count: { _all: 1 } },
+    { scanId: 9n, kind: 'step', status: 'failed', stub: false, _count: { _all: 1 } },
+  ],
+  lineageRows: [
+    { scanId: 9n, kind: 'step', status: 'failed', stepId: 10n, prevId: 0n, prevTable: null, repeatRun: 1 },
+    { scanId: 9n, kind: 'step', status: 'completed', stepId: 10n, prevId: 0n, prevTable: null, repeatRun: 1 },
+  ],
+};
+const singleStepWorkflow = {
+  steps: new Map([['10', { id: 10n, depth: 0, name: 'Map entrypoints', isLastStep: true }]]),
+  workflows: new Map([['3', { id: 3n, stepIds: [10n] }]]),
+};
+
+test('status summary does not count retried attempts as extra lineages once the workflow finished', async (t) => {
+  mockLineageQueries(t, retriedLineage);
+
+  for (const status of ['completed', 'post_processing']) {
+    const summaries = await statusSummariesByScan(
+      [{ id: 9n, status, workflowId: 3n, configuration: {} }],
+      singleStepWorkflow.steps,
+      singleStepWorkflow.workflows
+    );
+    const summary = summaries.get('9');
+
+    assert.equal(summary.stepAttempts, 2, status);
+    assert.equal(summary.expectedStepLineages, 1, status);
+    assert.equal(summary.completedStepLineages, 1, status);
+  }
+});
+
+test('status summary derives lineages from the workflow for stopped scans', async (t) => {
+  mockLineageQueries(t, retriedLineage);
+
+  const summaries = await statusSummariesByScan(
+    [{ id: 9n, status: 'stopped', workflowId: 3n, configuration: {} }],
+    singleStepWorkflow.steps,
+    singleStepWorkflow.workflows
+  );
+  const summary = summaries.get('9');
+
+  assert.equal(summary.stepAttempts, 2);
+  assert.equal(summary.expectedStepLineages, 1);
+  assert.equal(summary.completedStepLineages, 1);
+});
+
 test('scan serialization distinguishes raw candidates from listed findings', () => {
   const serialized = serializeScan(
     {
